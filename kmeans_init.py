@@ -5,6 +5,7 @@ import torch.nn.functional as F
 
 
 ## Will run kmeans initialization at every Conv2d layers of kernel size 3 or more.
+## |images|: images of dimension B x C x H x W
 ## |num_iter|: how many iterations of k-means to perform (default: 3)
 ## |use_whitening|: whitening the inputs before running k-means
 ## helps the quality of initialization by a lot, but it takes much longer.
@@ -36,12 +37,10 @@ class KMeansHook(object):
         self.use_whitening = use_whitening
 
     def __call__(self, module, inputs):
-        print(module)
         ## We follow step 1, 2 and 3of Coates and Ng, 2012
         ## https://www-cs.stanford.edu/~acoates/papers/coatesng_nntot2012.pdf
         
-        input = inputs[0].detach()
-        x = input  # x is the same as x that appears in the paper
+        x = inputs[0].detach()  # x is the same as x that appears in the paper
         if module.transposed:
             in_channels = module.in_channels
             out_channels = module.out_channels // module.groups
@@ -51,12 +50,13 @@ class KMeansHook(object):
 
         ## Preprocess
         ## Split the activations into patches
+        x = x[:, :in_channels] # in case we use grouping, let's just use the first group
         patchsize = module.kernel_size
         chunks = x.split(patchsize[0], dim=2)
         ## drop the last if the last patch is too small
         if chunks[-1].size(2) < patchsize[0]: 
             chunks = chunks[:-1]
-        x = torch.cat(chunks, dim=0)
+        x = torch.cat(chunks, dim=0)                
 
         chunks = x.split(patchsize[1], dim=3)
         ## drop the last if the last patch is too small
@@ -67,7 +67,7 @@ class KMeansHook(object):
         ## Step 1
         ## normalize the input
         x = self.normalize(x)
-
+        
         ## Step 2
         ## Whiten the input
         ## Code from
@@ -87,8 +87,8 @@ class KMeansHook(object):
         ## x_flat is a m x k matrix (m observations of k-dim vectors)
         ## I think it differs from the papers notation in that it's a transpose. 
         ## D is out_channels x k.
-
-        ## randomly initailize D
+        
+        # randomly initailize D
         D = torch.randn(out_channels, x_flat.size(1), dtype=x.dtype, device=x.device)
         D = self.normalize(D)
 
@@ -101,17 +101,18 @@ class KMeansHook(object):
 
         D = D.view(out_channels, *x.size()[1:])
 
-        ## Haven't really tested using transposed convolution
+        # Haven't really tested using transposed convolution
         if module.transposed:
             D = D.transpose((0, 1))
-            
+
+        assert module.weight.size() == D.size()
         module.weight = torch.nn.Parameter(D)
 
 
     def normalize(self, z):
         # insert extra dimension at 1 so that instance norm
         # uses mean and var across all inputs
-        z = F.instance_norm(z.unsqueeze(1)).squeeze()
+        z = F.instance_norm(z.unsqueeze(1))[:, 0]
         return z
         
 
@@ -130,13 +131,13 @@ def visualize_weights(net):
         max = image.max(axis=(2,3), keepdims=True)
         min = image.min(axis=(2,3), keepdims=True)
         image = (image - min) / (max - min)
-        image = np.concatenate(image, axis=1)
-        assert image.shape == (ic, kh * oc, kw)
+        image = np.concatenate(image, axis=2)
+        assert image.shape == (ic, kh, kw * oc)
 
         if ic != 3:
-            image = np.concatenate(image, axis=1)
+            image = np.concatenate(image, axis=0)
             image = image[np.newaxis, :]
-            assert image.shape == (1, kh * oc, kw * ic)
+            assert image.shape == (1, kh * ic, kw * oc)
             
         image = image.transpose((1, 2, 0))
         weight_visuals.append(image)
